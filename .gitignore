@@ -1,0 +1,12 @@
+# Binary
+kpf
+
+# Build directory
+build/
+.claude
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
