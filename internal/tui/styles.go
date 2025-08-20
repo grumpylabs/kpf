@@ -98,72 +98,78 @@ func RenderWithFooter(content, footer string, width, height int) string {
 		content = strings.Join(lines, "\n")
 	}
 	
-	// Style the footer to match admin colors with command highlighting
-	footerStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#FFFFFF")).
-		Background(lipgloss.Color("#005577")).
-		Width(width).
-		Padding(0, 1)
+	// Render styled footer with proper width
+	styledFooter := renderStyledFooter(footer, width)
 	
-	// Highlight command characters matching admin style exactly
-	styledFooter := highlightCommands(footer)
-	
-	return content + footerStyle.Render(styledFooter)
+	return content + styledFooter
 }
 
-// highlightCommands highlights commands in footer text matching admin style exactly
-func highlightCommands(text string) string {
-	// Split by spaces to process each command individually
-	parts := strings.Fields(text)
-	var result []string
-	
-	// Define consistent background for all parts
+// renderStyledFooter renders the footer with command highlighting and proper width
+func renderStyledFooter(text string, width int) string {
 	bgColor := lipgloss.Color("#005577")
+	fgColor := lipgloss.Color("#FFFFFF")
+	cmdColor := lipgloss.Color("#FFFF00")
 	
-	for _, part := range parts {
-		// Look for patterns like "↑↓/jk:navigate" or "Enter:view" etc.
-		if strings.Contains(part, ":") {
-			colonIndex := strings.Index(part, ":")
-			if colonIndex > 0 {
-				cmdPart := part[:colonIndex+1] // Include the colon
-				descPart := part[colonIndex+1:] // Everything after colon
-				
-				// Highlight the command part with yellow text matching admin
-				highlightedCmd := lipgloss.NewStyle().
-					Foreground(lipgloss.Color("#FFFF00")).
+	// First, pad the text to ensure it fills the width (accounting for padding)
+	effectiveWidth := width - 2 // -2 for left and right padding
+	if len(text) < effectiveWidth {
+		text = text + strings.Repeat(" ", effectiveWidth-len(text))
+	} else if len(text) > effectiveWidth {
+		text = text[:effectiveWidth]
+	}
+	
+	// Now process the text to add highlighting
+	var result strings.Builder
+	i := 0
+	
+	for i < len(text) {
+		// Find the next word boundary
+		wordStart := i
+		for i < len(text) && text[i] != ' ' {
+			i++
+		}
+		
+		if wordStart < i {
+			word := text[wordStart:i]
+			
+			// Check if word contains a command separator (:)
+			if colonIdx := strings.Index(word, ":"); colonIdx > 0 {
+				// Highlight the command part
+				result.WriteString(lipgloss.NewStyle().
+					Foreground(cmdColor).
 					Background(bgColor).
 					Bold(true).
-					Render(cmdPart)
+					Render(word[:colonIdx+1]))
 				
-				// Regular part with consistent background
-				regularPart := lipgloss.NewStyle().
-					Foreground(lipgloss.Color("#FFFFFF")).
+				// Normal style for description
+				result.WriteString(lipgloss.NewStyle().
+					Foreground(fgColor).
 					Background(bgColor).
-					Render(descPart)
-				
-				result = append(result, highlightedCmd+regularPart)
+					Render(word[colonIdx+1:]))
 			} else {
-				// No command part, render with normal style
-				styledPart := lipgloss.NewStyle().
-					Foreground(lipgloss.Color("#FFFFFF")).
+				// Normal word
+				result.WriteString(lipgloss.NewStyle().
+					Foreground(fgColor).
 					Background(bgColor).
-					Render(part)
-				result = append(result, styledPart)
+					Render(word))
 			}
-		} else {
-			// No colon, render with normal style
-			styledPart := lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#FFFFFF")).
+		}
+		
+		// Handle spaces
+		for i < len(text) && text[i] == ' ' {
+			result.WriteString(lipgloss.NewStyle().
+				Foreground(fgColor).
 				Background(bgColor).
-				Render(part)
-			result = append(result, styledPart)
+				Render(" "))
+			i++
 		}
 	}
 	
-	// Join with styled spaces to maintain background
-	spacer := lipgloss.NewStyle().
+	// Wrap with padding and ensure full width
+	return lipgloss.NewStyle().
 		Background(bgColor).
-		Render(" ")
-	
-	return strings.Join(result, spacer)
+		Foreground(fgColor).
+		Width(width).
+		Padding(0, 1).
+		Render(result.String())
 }

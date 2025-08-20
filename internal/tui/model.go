@@ -23,6 +23,7 @@ const (
 	helpView
 	portInputView
 	errorModalView
+	filterView
 )
 
 // Model represents the main TUI model
@@ -63,6 +64,11 @@ type Model struct {
 	
 	// Version info
 	commitHash     string
+	
+	// Filter state
+	filterInput    string
+	filterType     string // "status", "type", "name", "protocol", or empty for all
+	activeFilters  map[string]string // Store active filters
 }
 
 type keyMap struct {
@@ -84,6 +90,7 @@ type keyMap struct {
 	SortPorts     key.Binding
 	SortLocalPort key.Binding
 	Help         key.Binding
+	Filter       key.Binding
 }
 
 var keys = keyMap{
@@ -159,6 +166,10 @@ var keys = keyMap{
 		key.WithKeys("?", "h"),
 		key.WithHelp("?/h", "help"),
 	),
+	Filter: key.NewBinding(
+		key.WithKeys("/"),
+		key.WithHelp("/", "filter"),
+	),
 }
 
 // NewModel creates a new TUI model
@@ -199,6 +210,7 @@ func NewModel(client *k8s.Client, kubeconfigArg string, commitHash string) *Mode
 		sortField:      "namespace",
 		sortAscending:  true,
 		commitHash:     commitHash,
+		activeFilters:  make(map[string]string),
 	}
 }
 
@@ -286,7 +298,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 
 			case key.Matches(msg, m.keys.Enter):
-				if m.table.GetSelected() != nil {
+				selectedService := m.table.GetSelected()
+				if selectedService != nil {
+					m.detailViewService = *selectedService // Store a copy of the service we're viewing
 					m.viewMode = detailView
 					m.deploymentInfo = nil // Clear previous deployment info
 					return m, m.loadDeploymentInfo
@@ -364,6 +378,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case key.Matches(msg, m.keys.Help):
 				m.viewMode = helpView
 				return m, nil
+
+			case key.Matches(msg, m.keys.Filter):
+				m.viewMode = filterView
+				m.filterInput = ""
+				m.filterType = ""
+				return m, nil
 			}
 		} else if m.viewMode == helpView {
 			switch {
@@ -418,6 +438,58 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Any of these keys dismiss the error modal
 				m.viewMode = m.previousView
 				m.errorMessage = ""
+				return m, nil
+
+			default:
+				return m, nil
+			}
+		} else if m.viewMode == filterView {
+			switch {
+			case msg.Type == tea.KeyEnter:
+				// Apply the filter
+				if m.filterType != "" && m.filterInput != "" {
+					m.activeFilters[m.filterType] = m.filterInput
+				}
+				m.applyFilters()
+				m.viewMode = listView
+				return m, nil
+
+			case msg.Type == tea.KeyEsc:
+				// Cancel filter input
+				m.viewMode = listView
+				m.filterInput = ""
+				m.filterType = ""
+				return m, nil
+
+			case msg.Type == tea.KeyTab:
+				// Cycle through filter types
+				filterTypes := []string{"", "status", "type", "name", "protocol"}
+				currentIdx := 0
+				for i, ft := range filterTypes {
+					if ft == m.filterType {
+						currentIdx = i
+						break
+					}
+				}
+				m.filterType = filterTypes[(currentIdx+1)%len(filterTypes)]
+				return m, nil
+
+			case msg.String() == "C" && msg.Type == tea.KeyRunes:
+				// Clear all filters with capital C
+				m.activeFilters = make(map[string]string)
+				m.applyFilters()
+				m.viewMode = listView
+				return m, nil
+
+			case msg.Type == tea.KeyBackspace:
+				if len(m.filterInput) > 0 {
+					m.filterInput = m.filterInput[:len(m.filterInput)-1]
+				}
+				return m, nil
+
+			case msg.Type == tea.KeyRunes:
+				// Add characters to filter input
+				m.filterInput += string(msg.Runes)
 				return m, nil
 
 			default:
@@ -527,6 +599,8 @@ func (m *Model) View() string {
 		return m.renderPortInputView()
 	case errorModalView:
 		return m.renderErrorModal()
+	case filterView:
+		return m.renderFilterView()
 	default:
 		return m.renderListView()
 	}
@@ -556,7 +630,15 @@ func (m *Model) renderListView() string {
 		}
 		sortIndicator = fmt.Sprintf(" [%s%s]", m.sortField, direction)
 	}
-	footerText := fmt.Sprintf("[%d/%d]%s ↑↓/jk:navigate f:toggle-forward enter:details N/M/S/P/L:sort r:refresh ?/h:help q:quit", selected, total, sortIndicator)
+	
+	// Add filter indicator if filters are active
+	filterIndicator := ""
+	if len(m.activeFilters) > 0 {
+		filterIndicator = " [FILTERED]"
+	}
+	
+	footerText := fmt.Sprintf("[%d/%d]%s%s ↑↓/jk:navigate f:toggle-forward enter:details /:filter N/M/S/P/L:sort r:refresh ?/h:help q:quit", 
+		selected, total, sortIndicator, filterIndicator)
 
 	return RenderWithFooter(content, footerText, m.width, m.height)
 }
@@ -577,6 +659,18 @@ Navigation:
 
 Port Forwarding:
   f/F              Toggle port forward for selected service
+
+Filtering:
+  /                Open filter menu
+  Tab              Cycle through filter types (in filter menu)
+  Enter            Apply filter
+  C                Clear all filters (in filter menu)
+  
+  Filter types:
+    status         Filter by active/inactive forwarding
+    type           Filter by service type (ClusterIP/NodePort/LoadBalancer)
+    name           Filter by service name (partial match)
+    protocol       Filter by protocol (TCP/UDP)
 
 Sorting:
   N                Sort by namespace
@@ -657,8 +751,27 @@ func (m *Model) renderSectionHeaders() string {
 	// Services count (matching admin style)
 	services := m.table.services
 	activeCount := atomic.LoadInt64(&m.activeForwardsCount)
-	countText := fmt.Sprintf("Services (%d) - Active Forwards (%d)", len(services), activeCount)
+	visibleCount := m.table.GetRowCount()
+	totalCount := len(services)
+	
+	// Show filtered count if filters are active
+	countText := ""
+	if len(m.activeFilters) > 0 {
+		countText = fmt.Sprintf("Services (%d/%d filtered) - Active Forwards (%d)", visibleCount, totalCount, activeCount)
+	} else {
+		countText = fmt.Sprintf("Services (%d) - Active Forwards (%d)", totalCount, activeCount)
+	}
 	content.WriteString(sectionHeaderStyle.Render(countText) + "\n")
+	
+	// Show active filters if any
+	if len(m.activeFilters) > 0 {
+		var filterParts []string
+		for k, v := range m.activeFilters {
+			filterParts = append(filterParts, fmt.Sprintf("%s=%s", k, v))
+		}
+		filterText := fmt.Sprintf("Filters: %s", strings.Join(filterParts, ", "))
+		content.WriteString(sectionHeaderStyle.Render(filterText) + "\n")
+	}
 
 	// Blank line before table
 	content.WriteString("\n")
@@ -891,5 +1004,69 @@ func wordWrap(text string, width int) []string {
 	}
 
 	return lines
+}
+
+// applyFilters applies the active filters to the service table
+func (m *Model) applyFilters() {
+	m.table.ApplyFilters(m.activeFilters)
+}
+
+// renderFilterView renders the filter input view
+func (m *Model) renderFilterView() string {
+	// Header
+	header := m.renderAdminHeader()
+
+	// Filter type selection
+	filterTypeDisplay := "all"
+	if m.filterType != "" {
+		filterTypeDisplay = m.filterType
+	}
+
+	content := header + sectionHeaderStyle.Render("Filter Services") + "\n\n"
+	
+	// Show active filters
+	if len(m.activeFilters) > 0 {
+		content += "Active filters:\n"
+		for k, v := range m.activeFilters {
+			content += fmt.Sprintf("  • %s: %s\n", k, v)
+		}
+		content += "\n"
+	}
+	
+	content += "Filter type (Tab to cycle): " + lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#00AAFF")).
+		Bold(true).
+		Render(filterTypeDisplay) + "\n\n"
+	
+	// Show filter options based on type
+	switch m.filterType {
+	case "status":
+		content += "Enter status filter (active/inactive): "
+	case "type":
+		content += "Enter service type (ClusterIP/NodePort/LoadBalancer): "
+	case "name":
+		content += "Enter name filter (partial match): "
+	case "protocol":
+		content += "Enter protocol filter (TCP/UDP): "
+	default:
+		content += "Enter search term (searches all fields): "
+	}
+	
+	// Input box with cursor
+	inputBox := m.filterInput
+	if len(m.filterInput) == 0 {
+		inputBox += "_"
+	} else {
+		inputBox += "_"
+	}
+	content += inputBox + "\n\n"
+	
+	// Help text
+	content += "\n" + lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#888888")).
+		Render("Tab: cycle filter type | Enter: apply | C: clear all | Esc: cancel")
+
+	footerText := "Enter: apply filter  C: clear all filters  Esc: cancel"
+	return RenderWithFooter(content, footerText, m.width, m.height)
 }
 

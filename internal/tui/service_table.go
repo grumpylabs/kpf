@@ -30,22 +30,26 @@ type ServiceTableRow struct {
 
 // ServiceTable handles the service list display
 type ServiceTable struct {
-	rows        []ServiceTableRow
-	selectedRow int
-	width       int
-	height      int
-	services    []k8s.ServiceInfo
-	offset      int // For scrolling
+	rows         []ServiceTableRow
+	filteredRows []ServiceTableRow // Filtered rows for display
+	selectedRow  int
+	width        int
+	height       int
+	services     []k8s.ServiceInfo
+	offset       int // For scrolling
+	filters      map[string]string // Active filters
 }
 
 // NewServiceTable creates a new service table
 func NewServiceTable() *ServiceTable {
 	return &ServiceTable{
-		rows:        []ServiceTableRow{},
-		selectedRow: 0,
-		width:       120,
-		height:      30,
-		offset:      0,
+		rows:         []ServiceTableRow{},
+		filteredRows: []ServiceTableRow{},
+		selectedRow:  0,
+		width:        120,
+		height:       30,
+		offset:       0,
+		filters:      make(map[string]string),
 	}
 }
 
@@ -143,17 +147,23 @@ func (t *ServiceTable) SetServices(services []k8s.ServiceInfo) {
 		}
 	}
 	
+	// Apply existing filters
+	t.ApplyFilters(t.filters)
+	
 	// Simple selection restore - just ensure a valid row is selected
-	if t.selectedRow >= len(t.rows) {
-		t.selectedRow = len(t.rows) - 1
+	if t.selectedRow >= len(t.getActiveRows()) {
+		t.selectedRow = len(t.getActiveRows()) - 1
 	}
 	if t.selectedRow < 0 {
 		t.selectedRow = 0
 	}
 	
 	// Set selection on the current row
-	if len(t.rows) > 0 && t.selectedRow >= 0 && t.selectedRow < len(t.rows) {
-		t.rows[t.selectedRow].Selected = true
+	rows := t.getActiveRows()
+	if len(rows) > 0 && t.selectedRow >= 0 && t.selectedRow < len(rows) {
+		for i := range rows {
+			rows[i].Selected = (i == t.selectedRow)
+		}
 	}
 }
 
@@ -165,15 +175,16 @@ func (t *ServiceTable) SetSize(width, height int) {
 
 // SetSelected sets the selected row
 func (t *ServiceTable) SetSelected(index int) {
-	if index >= 0 && index < len(t.rows) {
+	rows := t.getActiveRows()
+	if index >= 0 && index < len(rows) {
 		// Clear previous selection
-		for i := range t.rows {
-			t.rows[i].Selected = false
+		for i := range rows {
+			rows[i].Selected = false
 		}
 		
 		t.selectedRow = index
-		if t.selectedRow < len(t.rows) {
-			t.rows[t.selectedRow].Selected = true
+		if t.selectedRow < len(rows) {
+			rows[t.selectedRow].Selected = true
 		}
 		
 		// Adjust scroll offset to keep selected row visible
@@ -183,24 +194,27 @@ func (t *ServiceTable) SetSelected(index int) {
 
 // GetSelected returns the currently selected service
 func (t *ServiceTable) GetSelected() *k8s.ServiceInfo {
-	if t.selectedRow >= 0 && t.selectedRow < len(t.rows) {
-		return &t.rows[t.selectedRow].ServiceData
+	rows := t.getActiveRows()
+	if t.selectedRow >= 0 && t.selectedRow < len(rows) {
+		return &rows[t.selectedRow].ServiceData
 	}
 	return nil
 }
 
 // GetSelectedPort returns the currently selected port info
 func (t *ServiceTable) GetSelectedPort() *k8s.PortInfo {
-	if t.selectedRow >= 0 && t.selectedRow < len(t.rows) {
-		return t.rows[t.selectedRow].PortInfo
+	rows := t.getActiveRows()
+	if t.selectedRow >= 0 && t.selectedRow < len(rows) {
+		return rows[t.selectedRow].PortInfo
 	}
 	return nil
 }
 
 // GetSelectedRow returns the currently selected table row
 func (t *ServiceTable) GetSelectedRow() *ServiceTableRow {
-	if t.selectedRow >= 0 && t.selectedRow < len(t.rows) {
-		return &t.rows[t.selectedRow]
+	rows := t.getActiveRows()
+	if t.selectedRow >= 0 && t.selectedRow < len(rows) {
+		return &rows[t.selectedRow]
 	}
 	return nil
 }
@@ -212,7 +226,7 @@ func (t *ServiceTable) GetSelectedIndex() int {
 
 // GetRowCount returns the total number of rows
 func (t *ServiceTable) GetRowCount() int {
-	return len(t.rows)
+	return len(t.getActiveRows())
 }
 
 // MoveUp moves selection up
@@ -224,7 +238,8 @@ func (t *ServiceTable) MoveUp() {
 
 // MoveDown moves selection down
 func (t *ServiceTable) MoveDown() {
-	if t.selectedRow < len(t.rows)-1 {
+	rows := t.getActiveRows()
+	if t.selectedRow < len(rows)-1 {
 		t.SetSelected(t.selectedRow + 1)
 	}
 }
@@ -246,7 +261,8 @@ func (t *ServiceTable) adjustScrollOffset() {
 	}
 	
 	// Don't scroll past the end
-	maxOffset := len(t.rows) - availableRows
+	rows := t.getActiveRows()
+	maxOffset := len(rows) - availableRows
 	if maxOffset < 0 {
 		maxOffset = 0
 	}
@@ -257,7 +273,11 @@ func (t *ServiceTable) adjustScrollOffset() {
 
 // Render renders the table
 func (t *ServiceTable) Render() string {
-	if len(t.rows) == 0 {
+	rows := t.getActiveRows()
+	if len(rows) == 0 {
+		if len(t.filters) > 0 {
+			return "No services match the current filters"
+		}
 		return "No services found"
 	}
 	
@@ -279,13 +299,14 @@ func (t *ServiceTable) Render() string {
 	}
 	
 	// Render visible data rows
+	activeRows := t.getActiveRows()
 	endIndex := t.offset + availableRows
-	if endIndex > len(t.rows) {
-		endIndex = len(t.rows)
+	if endIndex > len(activeRows) {
+		endIndex = len(activeRows)
 	}
 	
 	for i := t.offset; i < endIndex; i++ {
-		row := t.rows[i]
+		row := activeRows[i]
 		
 		// Status indicator
 		statusIndicator := "○" // Gray circle for inactive
@@ -341,6 +362,7 @@ func (t *ServiceTable) Render() string {
 
 // SortBy sorts the table by the specified field
 func (t *ServiceTable) SortBy(field string, ascending bool) {
+	// Sort all rows first
 	sort.Slice(t.rows, func(i, j int) bool {
 		var result bool
 		switch field {
@@ -397,22 +419,82 @@ func (t *ServiceTable) SortBy(field string, ascending bool) {
 		return result
 	})
 	
+	// Also sort filtered rows if filters are active
+	if len(t.filters) > 0 {
+		sort.Slice(t.filteredRows, func(i, j int) bool {
+			var result bool
+			switch field {
+			case "namespace":
+				result = t.filteredRows[i].Namespace < t.filteredRows[j].Namespace
+				if t.filteredRows[i].Namespace == t.filteredRows[j].Namespace {
+					result = t.filteredRows[i].Name < t.filteredRows[j].Name
+					if t.filteredRows[i].Name == t.filteredRows[j].Name {
+						result = t.filteredRows[i].Port < t.filteredRows[j].Port
+					}
+				}
+			case "name":
+				result = t.filteredRows[i].Name < t.filteredRows[j].Name
+				if t.filteredRows[i].Name == t.filteredRows[j].Name {
+					result = t.filteredRows[i].Port < t.filteredRows[j].Port
+				}
+			case "status":
+				// Active ports first when ascending
+				if t.filteredRows[i].IsForwarding != t.filteredRows[j].IsForwarding {
+					result = t.filteredRows[i].IsForwarding
+				} else {
+					result = t.filteredRows[i].Name < t.filteredRows[j].Name
+					if t.filteredRows[i].Name == t.filteredRows[j].Name {
+						result = t.filteredRows[i].Port < t.filteredRows[j].Port
+					}
+				}
+			case "ports":
+				// Sort by port number
+				if t.filteredRows[i].Port == t.filteredRows[j].Port {
+					result = t.filteredRows[i].Name < t.filteredRows[j].Name
+				} else {
+					result = t.filteredRows[i].Port < t.filteredRows[j].Port
+				}
+			case "localport":
+				// Sort by forwarding port number
+				if t.filteredRows[i].ForwardingPort == t.filteredRows[j].ForwardingPort {
+					result = t.filteredRows[i].Name < t.filteredRows[j].Name
+					if t.filteredRows[i].Name == t.filteredRows[j].Name {
+						result = t.filteredRows[i].Port < t.filteredRows[j].Port
+					}
+				} else {
+					result = t.filteredRows[i].ForwardingPort < t.filteredRows[j].ForwardingPort
+				}
+			default:
+				result = t.filteredRows[i].Name < t.filteredRows[j].Name
+				if t.filteredRows[i].Name == t.filteredRows[j].Name {
+					result = t.filteredRows[i].Port < t.filteredRows[j].Port
+				}
+			}
+			
+			if !ascending {
+				result = !result
+			}
+			return result
+		})
+	}
+	
 	// Clear and reset selection indicators
-	for i := range t.rows {
-		t.rows[i].Selected = false
+	rows := t.getActiveRows()
+	for i := range rows {
+		rows[i].Selected = false
 	}
 	
 	// Reset selection to ensure valid index
-	if t.selectedRow >= len(t.rows) {
-		t.selectedRow = len(t.rows) - 1
+	if t.selectedRow >= len(rows) {
+		t.selectedRow = len(rows) - 1
 	}
 	if t.selectedRow < 0 {
 		t.selectedRow = 0
 	}
 	
 	// Set selection on current row
-	if len(t.rows) > 0 && t.selectedRow >= 0 && t.selectedRow < len(t.rows) {
-		t.rows[t.selectedRow].Selected = true
+	if len(rows) > 0 && t.selectedRow >= 0 && t.selectedRow < len(rows) {
+		rows[t.selectedRow].Selected = true
 	}
 }
 
@@ -425,4 +507,116 @@ func truncateString(s string, maxLen int) string {
 		return s[:maxLen]
 	}
 	return s[:maxLen-1] + "…"
+}
+
+// ApplyFilters applies the given filters to the service table
+func (t *ServiceTable) ApplyFilters(filters map[string]string) {
+	t.filters = filters
+	
+	// If no filters, show all rows
+	if len(filters) == 0 {
+		t.filteredRows = make([]ServiceTableRow, len(t.rows))
+		copy(t.filteredRows, t.rows)
+		t.adjustAfterFilter()
+		return
+	}
+	
+	// Filter rows based on active filters
+	t.filteredRows = []ServiceTableRow{}
+	for _, row := range t.rows {
+		if t.matchesFilters(row, filters) {
+			t.filteredRows = append(t.filteredRows, row)
+		}
+	}
+	
+	t.adjustAfterFilter()
+}
+
+// matchesFilters checks if a row matches all active filters
+func (t *ServiceTable) matchesFilters(row ServiceTableRow, filters map[string]string) bool {
+	for filterType, filterValue := range filters {
+		filterValue = strings.ToLower(filterValue)
+		
+		switch filterType {
+		case "status":
+			// Filter by forwarding status
+			if filterValue == "active" && !row.IsForwarding {
+				return false
+			}
+			if filterValue == "inactive" && row.IsForwarding {
+				return false
+			}
+			
+		case "type":
+			// Filter by service type
+			if !strings.Contains(strings.ToLower(row.Type), filterValue) {
+				return false
+			}
+			
+		case "name":
+			// Filter by service name (partial match)
+			if !strings.Contains(strings.ToLower(row.Name), filterValue) {
+				return false
+			}
+			
+		case "protocol":
+			// Filter by protocol
+			if !strings.EqualFold(row.Protocol, filterValue) {
+				return false
+			}
+			
+		default:
+			// Generic search across all fields
+			found := false
+			searchFields := []string{
+				row.Namespace,
+				row.Name,
+				row.Type,
+				row.ClusterIP,
+				row.ExternalIP,
+				row.PortName,
+				fmt.Sprintf("%d", row.Port),
+				row.Protocol,
+			}
+			
+			for _, field := range searchFields {
+				if strings.Contains(strings.ToLower(field), filterValue) {
+					found = true
+					break
+				}
+			}
+			
+			if !found {
+				return false
+			}
+		}
+	}
+	
+	return true
+}
+
+// adjustAfterFilter adjusts selection and scrolling after filtering
+func (t *ServiceTable) adjustAfterFilter() {
+	// Reset selection to first filtered row
+	if len(t.filteredRows) > 0 {
+		t.selectedRow = 0
+		// Clear all selected flags
+		for i := range t.filteredRows {
+			t.filteredRows[i].Selected = false
+		}
+		t.filteredRows[0].Selected = true
+	} else {
+		t.selectedRow = -1
+	}
+	
+	// Reset scroll offset
+	t.offset = 0
+}
+
+// getActiveRows returns the currently active row set (filtered or all)
+func (t *ServiceTable) getActiveRows() []ServiceTableRow {
+	if len(t.filters) > 0 {
+		return t.filteredRows
+	}
+	return t.rows
 }
