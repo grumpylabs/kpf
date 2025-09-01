@@ -20,8 +20,8 @@ type ServiceTableRow struct {
 	Port           int32
 	Protocol       string
 	Age            string
-	IsForwarding   bool
-	ForwardingPort int
+	ForwardingState k8s.ForwardingState
+	ForwardingPort  int
 	Selected       bool
 	// Complete service data duplicated per row
 	ServiceData    k8s.ServiceInfo  // Complete copy of service data
@@ -101,20 +101,20 @@ func (t *ServiceTable) SetServices(services []k8s.ServiceInfo) {
 		if len(svc.Ports) == 0 {
 			// Service with no ports
 			row := ServiceTableRow{
-				Namespace:      svc.Namespace,
-				Name:           svc.Name,
-				Type:           svc.Type,
-				ClusterIP:      clusterIP,
-				ExternalIP:     externalIP,
-				PortName:       "<none>",
-				Port:           0,
-				Protocol:       "",
-				Age:            age,
-				IsForwarding:   false,
-				ForwardingPort: 0,
-				Selected:       false, // Will be set properly in SetSelected
-				ServiceData:    svc,  // Copy complete service data
-				PortInfo:       nil,
+				Namespace:       svc.Namespace,
+				Name:            svc.Name,
+				Type:            svc.Type,
+				ClusterIP:       clusterIP,
+				ExternalIP:      externalIP,
+				PortName:        "<none>",
+				Port:            0,
+				Protocol:        "",
+				Age:             age,
+				ForwardingState: k8s.ForwardingStateInactive,
+				ForwardingPort:  0,
+				Selected:        false, // Will be set properly in SetSelected
+				ServiceData:     svc,   // Copy complete service data
+				PortInfo:        nil,
 			}
 			t.rows = append(t.rows, row)
 		} else {
@@ -136,8 +136,8 @@ func (t *ServiceTable) SetServices(services []k8s.ServiceInfo) {
 					Port:           port.Port,
 					Protocol:       port.Protocol,
 					Age:            age,
-					IsForwarding:   port.IsForwarding,
-					ForwardingPort: port.ForwardingPort,
+					ForwardingState: port.ForwardingState,
+					ForwardingPort:  port.ForwardingPort,
 					Selected:       false, // Will be set properly in SetSelected
 					ServiceData:    svc,  // Copy complete service data
 					PortInfo:       port,
@@ -147,19 +147,46 @@ func (t *ServiceTable) SetServices(services []k8s.ServiceInfo) {
 		}
 	}
 	
+	// Store the currently selected service/port info before applying filters
+	var selectedServiceKey string
+	if t.selectedRow >= 0 && t.selectedRow < len(t.getActiveRows()) {
+		currentRows := t.getActiveRows()
+		if len(currentRows) > 0 {
+			selected := currentRows[t.selectedRow]
+			selectedServiceKey = fmt.Sprintf("%s/%s:%d", selected.Namespace, selected.Name, selected.Port)
+		}
+	}
+	
 	// Apply existing filters
 	t.ApplyFilters(t.filters)
 	
-	// Simple selection restore - just ensure a valid row is selected
-	if t.selectedRow >= len(t.getActiveRows()) {
-		t.selectedRow = len(t.getActiveRows()) - 1
-	}
-	if t.selectedRow < 0 {
-		t.selectedRow = 0
+	// Try to restore selection to the same service/port
+	newSelectedRow := 0
+	if selectedServiceKey != "" {
+		rows := t.getActiveRows()
+		for i, row := range rows {
+			rowKey := fmt.Sprintf("%s/%s:%d", row.Namespace, row.Name, row.Port)
+			if rowKey == selectedServiceKey {
+				newSelectedRow = i
+				break
+			}
+		}
 	}
 	
-	// Set selection on the current row
+	// Ensure valid row is selected
 	rows := t.getActiveRows()
+	if newSelectedRow >= len(rows) {
+		newSelectedRow = len(rows) - 1
+	}
+	if newSelectedRow < 0 {
+		newSelectedRow = 0
+	}
+	t.selectedRow = newSelectedRow
+	
+	// Adjust scroll offset to keep selected row visible
+	t.adjustScrollOffset()
+	
+	// Set selection on the current row
 	if len(rows) > 0 && t.selectedRow >= 0 && t.selectedRow < len(rows) {
 		for i := range rows {
 			rows[i].Selected = (i == t.selectedRow)
@@ -284,8 +311,8 @@ func (t *ServiceTable) Render() string {
 	var content strings.Builder
 	
 	// Render header row with full width background
-	headerLine := fmt.Sprintf("%-35s %-30s %-12s %-16s %-16s %-15s %-8s %-10s %-12s %8s",
-		"NAMESPACE", "NAME", "TYPE", "CLUSTER-IP", "EXTERNAL-IP", "PORT-NAME", "PORT", "PROTOCOL", "LOCAL-PORT", "AGE")
+	headerLine := fmt.Sprintf("%-35s %-30s %-4s %-16s %-16s %-15s %-18s %-12s",
+		"NAMESPACE", "NAME", "TYPE", "CLUSTER-IP", "EXTERNAL-IP", "PORT-NAME", "PORT", "LOCAL-PORT")
 	
 	// Ensure header background extends to full terminal width
 	headerWithBg := adminTableHeaderStyle.Width(t.width).Render(headerLine)
@@ -310,15 +337,19 @@ func (t *ServiceTable) Render() string {
 		
 		// Status indicator
 		statusIndicator := "○" // Gray circle for inactive
-		if row.IsForwarding {
-			statusIndicator = "●" // Green filled circle for active
-		}
-		
-		// Color the indicator
 		var coloredIndicator string
-		if row.IsForwarding {
+		
+		switch row.ForwardingState {
+		case k8s.ForwardingStateActive:
+			statusIndicator = "●" // Green filled circle for active
 			coloredIndicator = activeStyle.Render(statusIndicator)
-		} else {
+		case k8s.ForwardingStatePending:
+			statusIndicator = "●" // Yellow filled circle for pending
+			coloredIndicator = pendingStyle.Render(statusIndicator)
+		case k8s.ForwardingStateFailed:
+			statusIndicator = "●" // Red filled circle for failed
+			coloredIndicator = failedStyle.Render(statusIndicator)
+		default: // ForwardingStateInactive
 			coloredIndicator = inactiveStyle.Render(statusIndicator)
 		}
 		
@@ -330,21 +361,23 @@ func (t *ServiceTable) Render() string {
 		portName := truncateString(row.PortName, 15)
 		port := ""
 		if row.Port > 0 {
-			port = fmt.Sprintf("%d", row.Port)
+			if row.Protocol != "" {
+				port = fmt.Sprintf("%d/%s", row.Port, row.Protocol)
+			} else {
+				port = fmt.Sprintf("%d", row.Port)
+			}
 		}
-		port = truncateString(port, 8)
-		protocol := truncateString(row.Protocol, 10)
-		age := truncateString(row.Age, 8)
+		port = truncateString(port, 18)
 		
 		// Local port column
 		localPort := ""
-		if row.IsForwarding {
+		if row.ForwardingState == k8s.ForwardingStateActive {
 			localPort = fmt.Sprintf(":%d", row.ForwardingPort)
 		}
 		localPort = truncateString(localPort, 12)
 		
-		line := fmt.Sprintf("%-35s %-30s %-12s %-16s %-16s %-15s %-8s %-10s %-12s %8s",
-			namespace, name, row.Type, clusterIP, externalIP, portName, port, protocol, localPort, age)
+		line := fmt.Sprintf("%-35s %-30s %-4s %-16s %-16s %-15s %-18s %-12s",
+			namespace, name, compactServiceType(row.Type), clusterIP, externalIP, portName, port, localPort)
 		
 		// Apply row styling
 		var styledLine string
@@ -380,9 +413,9 @@ func (t *ServiceTable) SortBy(field string, ascending bool) {
 				result = t.rows[i].Port < t.rows[j].Port
 			}
 		case "status":
-			// Active ports first when ascending
-			if t.rows[i].IsForwarding != t.rows[j].IsForwarding {
-				result = t.rows[i].IsForwarding
+			// Active ports first when ascending, then pending, then failed, then inactive
+			if t.rows[i].ForwardingState != t.rows[j].ForwardingState {
+				result = t.rows[i].ForwardingState < t.rows[j].ForwardingState
 			} else {
 				result = t.rows[i].Name < t.rows[j].Name
 				if t.rows[i].Name == t.rows[j].Name {
@@ -438,9 +471,9 @@ func (t *ServiceTable) SortBy(field string, ascending bool) {
 					result = t.filteredRows[i].Port < t.filteredRows[j].Port
 				}
 			case "status":
-				// Active ports first when ascending
-				if t.filteredRows[i].IsForwarding != t.filteredRows[j].IsForwarding {
-					result = t.filteredRows[i].IsForwarding
+				// Active ports first when ascending, then pending, then failed, then inactive
+				if t.filteredRows[i].ForwardingState != t.filteredRows[j].ForwardingState {
+					result = t.filteredRows[i].ForwardingState < t.filteredRows[j].ForwardingState
 				} else {
 					result = t.filteredRows[i].Name < t.filteredRows[j].Name
 					if t.filteredRows[i].Name == t.filteredRows[j].Name {
@@ -509,6 +542,22 @@ func truncateString(s string, maxLen int) string {
 	return s[:maxLen-1] + "…"
 }
 
+// compactServiceType converts service type to compact notation
+func compactServiceType(serviceType string) string {
+	switch serviceType {
+	case "ClusterIP":
+		return "C"
+	case "NodePort":
+		return "N"
+	case "LoadBalancer":
+		return "L"
+	case "ExternalName":
+		return "E"
+	default:
+		return "-"
+	}
+}
+
 // ApplyFilters applies the given filters to the service table
 func (t *ServiceTable) ApplyFilters(filters map[string]string) {
 	t.filters = filters
@@ -540,10 +589,10 @@ func (t *ServiceTable) matchesFilters(row ServiceTableRow, filters map[string]st
 		switch filterType {
 		case "status":
 			// Filter by forwarding status
-			if filterValue == "active" && !row.IsForwarding {
+			if filterValue == "active" && row.ForwardingState != k8s.ForwardingStateActive {
 				return false
 			}
-			if filterValue == "inactive" && row.IsForwarding {
+			if filterValue == "inactive" && row.ForwardingState == k8s.ForwardingStateActive {
 				return false
 			}
 			

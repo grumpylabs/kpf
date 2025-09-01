@@ -1,0 +1,62 @@
+DEBUG: 'f' key pressed in listView
+DEBUG: Sending pending message then starting port forward
+DEBUG: Received portForwardPendingMsg: db/keyval-nodeport:6379
+DEBUG: startPortForward called
+DEBUG: Service db/keyval-nodeport port 6379 state: pending
+DEBUG: Calling StartForwardWithLocalPort for db/keyval-nodeport:6379
+DEBUG: Manager.StartForwardWithLocalPort called for db/keyval-nodeport:6379
+DEBUG: Waiting for port forward to be ready...
+DEBUG: Port forward ready!
+DEBUG: StartForwardWithLocalPort succeeded, localPort=6379
+DEBUG: Received portForwardStartedMsg
+DEBUG: 'f' key pressed in listView
+DEBUG: Sending pending message then starting port forward
+DEBUG: startPortForward called
+DEBUG: Service db/pgdb-nodeport port 5432 state: inactive
+DEBUG: Calling StartForwardWithLocalPort for db/pgdb-nodeport:5432
+DEBUG: Manager.StartForwardWithLocalPort called for db/pgdb-nodeport:5432
+DEBUG: Received portForwardPendingMsg: db/pgdb-nodeport:5432
+DEBUG: Waiting for port forward to be ready...
+DEBUG: 'f' key pressed in listView
+DEBUG: Sending pending message then starting port forward
+DEBUG: startPortForward called
+DEBUG: Received portForwardPendingMsg: default/kubernetes:443
+DEBUG: Service default/kubernetes port 443 state: inactive
+DEBUG: Calling StartForwardWithLocalPort for default/kubernetes:443
+DEBUG: Manager.StartForwardWithLocalPort called for default/kubernetes:443
+DEBUG: StartForwardWithLocalPort returned error: no target reference found for service kubernetes
+DEBUG: Received portForwardFailedMsg: default/kubernetes:443 - no target reference found for service kubernetes
+DEBUG: Timeout after 10 seconds
+DEBUG: StartForwardWithLocalPort returned error: timeout waiting for port forward to be ready
+DEBUG: Received portForwardFailedMsg: db/pgdb-nodeport:5432 - timeout waiting for port forward to be ready
+DEBUG: 'f' key pressed in listView
+DEBUG: Sending pending message then starting port forward
+DEBUG: startPortForward called
+DEBUG: Service default/kubernetes port 443 state: failed
+DEBUG: Retrying StartForwardWithLocalPort for default/kubernetes:443
+DEBUG: Manager.StartForwardWithLocalPort called for default/kubernetes:443
+DEBUG: Retry StartForwardWithLocalPort returned error: no target reference found for service kubernetes
+DEBUG: Received portForwardFailedMsg: default/kubernetes:443 - no target reference found for service kubernetes
+DEBUG: 'f' key pressed in listView
+DEBUG: Sending pending message then starting port forward
+DEBUG: Received portForwardPendingMsg: db/pgdb-postgresql:5432
+DEBUG: startPortForward called
+DEBUG: Service db/pgdb-postgresql port 5432 state: pending
+DEBUG: Calling StartForwardWithLocalPort for db/pgdb-postgresql:5432
+DEBUG: Manager.StartForwardWithLocalPort called for db/pgdb-postgresql:5432
+DEBUG: Waiting for port forward to be ready...
+DEBUG: 'f' key pressed in listView
+DEBUG: Sending pending message then starting port forward
+DEBUG: startPortForward called
+DEBUG: Service db/keyval-service port 6379 state: inactive
+DEBUG: Calling StartForwardWithLocalPort for db/keyval-service:6379
+DEBUG: Manager.StartForwardWithLocalPort called for db/keyval-service:6379
+DEBUG: Received portForwardPendingMsg: db/keyval-service:6379
+DEBUG: StartForwardWithLocalPort returned error: port 6379 is already in use
+DEBUG: Manager.StartForwardWithLocalPort called for db/keyval-service:6379
+DEBUG: Port forwarding already active for db/keyval-service:6379
+DEBUG: Timeout after 10 seconds
+DEBUG: StartForwardWithLocalPort returned error: timeout waiting for port forward to be ready
+DEBUG: Received portForwardFailedMsg: db/pgdb-postgresql:5432 - timeout waiting for port forward to be ready
+DEBUG: Manager.StartForwardWithLocalPort called for db/keyval-service:6379
+DEBUG: Port forwarding already active for db/keyval-service:6379

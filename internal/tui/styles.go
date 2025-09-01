@@ -41,6 +41,14 @@ var (
 		Bold(true).
 		Foreground(lipgloss.Color("#00FF00"))
 
+	pendingStyle = lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("#FFFF00"))
+
+	failedStyle = lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("#FF0000"))
+
 	inactiveStyle = lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#888888"))
 
