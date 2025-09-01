@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/grumpylabs/kpf/internal/k8s"
@@ -13,11 +14,26 @@ type servicesLoadedMsg struct {
 	services []k8s.ServiceInfo
 }
 
+type servicesRefreshMsg struct{}
+
 type portForwardStartedMsg struct {
 	localPort int
 }
 
 type portForwardStoppedMsg struct{}
+
+type portForwardFailedMsg struct {
+	namespace string
+	service   string
+	port      int
+	reason    string
+}
+
+type portForwardPendingMsg struct {
+	namespace string
+	service   string
+	port      int
+}
 
 type portConflictMsg struct {
 	servicePort int
@@ -37,7 +53,6 @@ type deploymentLoadedMsg struct {
 	deployment *k8s.DeploymentInfo
 }
 
-
 func (m *Model) loadServices() tea.Msg {
 	ctx := context.Background()
 	services, err := m.client.GetServices(ctx)
@@ -52,21 +67,31 @@ func (m *Model) loadServices() tea.Msg {
 		// Update per-port forwarding status
 		for j := range services[i].Ports {
 			port := &services[i].Ports[j]
-			port.IsForwarding = m.forwardManager.IsForwarding(services[i].Namespace, services[i].Name, int(port.Port))
-			if port.IsForwarding {
-				port.ForwardingPort = m.forwardManager.GetLocalPort(services[i].Namespace, services[i].Name, int(port.Port))
+			
+			// Get forward info to check state
+			fwInfo := m.forwardManager.GetForwardInfo(services[i].Namespace, services[i].Name, int(port.Port))
+			if fwInfo != nil {
+				port.ForwardingState = fwInfo.ForwardingState
+				port.ForwardingPort = fwInfo.LocalPort
+				port.ForwardStartTime = fwInfo.StartedAt
+				port.FailureReason = fwInfo.FailureReason
+				port.FailureTime = fwInfo.FailureTime
 			} else {
-				port.ForwardingPort = 0 // Ensure it's cleared when not forwarding
+				port.ForwardingState = k8s.ForwardingStateInactive
+				port.ForwardingPort = 0
+				port.ForwardStartTime = time.Time{}
+				port.FailureReason = ""
+				port.FailureTime = time.Time{}
 			}
 		}
 		
 		// For backward compatibility, set service-level forwarding info from first active port
-		if services[i].IsForwarding {
-			for _, port := range services[i].Ports {
-				if port.IsForwarding {
-					services[i].ForwardingPort = port.ForwardingPort
-					break
-				}
+		services[i].IsForwarding = false
+		for _, port := range services[i].Ports {
+			if port.ForwardingState == k8s.ForwardingStateActive {
+				services[i].IsForwarding = true
+				services[i].ForwardingPort = port.ForwardingPort
+				break
 			}
 		}
 	}
@@ -77,33 +102,62 @@ func (m *Model) loadServices() tea.Msg {
 func (m *Model) startPortForward() tea.Msg {
 	selectedRow := m.table.GetSelectedRow()
 	if selectedRow == nil {
-		return errorMsg{err: fmt.Errorf("no row selected")}
+		return nil
 	}
 
 	svc := &selectedRow.ServiceData
 	if svc.Name == "" {
-		return errorMsg{err: fmt.Errorf("no service info available")}
+		return nil
 	}
 
-	// If no specific port (service with no ports)
 	if selectedRow.PortInfo == nil {
-		return errorMsg{err: fmt.Errorf("service has no ports to forward")}
+		return nil
 	}
 
 	port := selectedRow.PortInfo
 	
-	if selectedRow.IsForwarding {
+	if selectedRow.PortInfo.ForwardingState == k8s.ForwardingStateActive {
 		// Port is active, stop it
 		m.forwardManager.StopForward(svc.Namespace, svc.Name, int(port.Port))
 		return portForwardStoppedMsg{}
-	} else {
-		// Port is inactive, start it
-		localPort, err := m.forwardManager.StartForwardWithLocalPort(context.Background(), svc.Namespace, svc.Name, int(port.Port), int(port.Port))
+	} else if selectedRow.PortInfo.ForwardingState == k8s.ForwardingStateFailed {
+		// Port failed, clear the failure and try again
+		m.forwardManager.StopForward(svc.Namespace, svc.Name, int(port.Port)) // Clean up failed forward
+		
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		
+		localPort, err := m.forwardManager.StartForwardWithLocalPort(ctx, svc.Namespace, svc.Name, int(port.Port), int(port.Port))
 		if err != nil {
-			if fmt.Sprintf("port %d is already in use", port.Port) == err.Error() {
+			if strings.Contains(err.Error(), "already in use") {
 				return portConflictMsg{servicePort: int(port.Port), remotePort: int(port.Port)}
 			}
-			return errorMsg{err: err}
+			// For any other error (no pods, target ref nil, etc.), return failure with details
+			return portForwardFailedMsg{
+				namespace: svc.Namespace,
+				service:   svc.Name,
+				port:      int(port.Port),
+				reason:    err.Error(),
+			}
+		}
+		return portForwardStartedMsg{localPort: localPort}
+	} else {
+		// Port is inactive, start it with timeout context
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		
+		localPort, err := m.forwardManager.StartForwardWithLocalPort(ctx, svc.Namespace, svc.Name, int(port.Port), int(port.Port))
+		if err != nil {
+			if strings.Contains(err.Error(), "already in use") {
+				return portConflictMsg{servicePort: int(port.Port), remotePort: int(port.Port)}
+			}
+			// For any other error (timeout, no pods, target ref nil, etc.), return failure with details
+			return portForwardFailedMsg{
+				namespace: svc.Namespace,
+				service:   svc.Name,
+				port:      int(port.Port),
+				reason:    err.Error(),
+			}
 		}
 		return portForwardStartedMsg{localPort: localPort}
 	}
@@ -128,9 +182,15 @@ func (m *Model) startPortForwardWithUserPort() tea.Msg {
 		return errorMsg{err: fmt.Errorf("port must be between 1024-65535")}
 	}
 
-	// Try to start port forward with user's port
-	localPort, err := m.forwardManager.StartForwardWithLocalPort(context.Background(), svc.Namespace, svc.Name, m.remotePort, userPort)
+	// Try to start port forward with user's port with a timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	
+	localPort, err := m.forwardManager.StartForwardWithLocalPort(ctx, svc.Namespace, svc.Name, m.remotePort, userPort)
 	if err != nil {
+		if strings.Contains(err.Error(), "timeout") {
+			return errorMsg{err: fmt.Errorf("timeout establishing port forward to %s/%s:%d", svc.Namespace, svc.Name, m.remotePort)}
+		}
 		return errorMsg{err: err}
 	}
 
